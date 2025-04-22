@@ -1,90 +1,93 @@
-/**
- * Projekt FLP 2024/25 - Turinguv stroj
- * Autor: Veronika Jirmusová
- * Login: xjirmu00
- * Akademicky rok: 2024/2025
- *
- * Popis:
- * Tento program simuluje chovani nedeterministickeho Turingova stroje.
- */
-
+% main.pl – Nedeterministický Turingův stroj
+:- dynamic rule/5.
 :- use_module(library(readutil)).
-:- dynamic(rule/4).
+
+initial('S').
+accepting('F').
+blank(' ').             % atom pro prázdný symbol (mezera)
 
 start :-
-    writeln('>>> start'),
+    prompt(_, ''),      % vypnout interaktivní prompt
     read_lines(Lines),
-    writeln('>>> nacteny radky'),
-    maplist(split_words, Lines, Split),
-    writeln('>>> splitnuto'),
-    maplist(writeln, Split),
-    append(Rules, [[TapeLine]], Split),
-    maplist(parse_rule, Rules),
-    writeln('>>> zacinam simulaci'),
-    simulate([], 'S', TapeLine).
-
-
-% Čte všechny řádky ze standardního vstupu
-read_lines(Lines) :-
-    read_line_to_codes(user_input, Line),
-    ( Line == end_of_file ->
-        Lines = []
-    ;
-        Lines = [Line | Rest],
-        read_lines(Rest)
+    build(Lines, Rules, Tape),
+    maplist(assertz, Rules),
+    ( simulate('S', [], Tape, [], [], Out) ->
+        print_all(Out),
+        halt(0)
+    ; writeln('Abnormalni zastaveni.'), halt(1)
     ).
 
-% Rozdělení řádku na seznam slov podle mezer
-split_words(LineCodes, Words) :-
-    atom_codes(LineAtom, LineCodes),
-    atomic_list_concat(Atoms, ' ', LineAtom),
-    maplist(atom_chars, Atoms, Words).
-
-% Parsování pravidla
-parse_rule([S1, R1, S2, R2]) :-
-    atom_chars(S, S1),
-    atom_chars(R, R1),
-    atom_chars(NS, S2),
-    atom_chars(W, R2),
-    (   W = ['L'] ; W = ['R']
-    ->  assertz(rule(S, R, NS, W))         % Pohyb
-    ;   assertz(rule(S, R, NS, W))         % Přepis znaku
+% načte celé stdin jako seznam atomů (jedna řádka = jeden atom)
+read_lines(Ls) :-
+    read_line_to_codes(user_input, Codes),
+    ( Codes == end_of_file ->
+        Ls = []
+    ; atom_codes(A, Codes),
+      read_lines(Rest),
+      Ls = [A|Rest]
     ).
 
+% rozdělí seznam řádek na pravidla a pásku
+build(Lines, Rules, Tape) :-
+    append(RuleLines, [TapeAtom], Lines),
+    maplist(parse_rule, RuleLines, Rules),
+    atom_chars(TapeAtom, Tape).
 
-
-
-% Simulace
-simulate(Left, 'F', [H|R]) :-
-    print_config(Left, 'F', H, R),
-    halt(0).
-
-simulate(Left, State, [H|R]) :-
-    print_config(Left, State, H, R),
-    format('>>> Hledam pravidlo pro stav: ~w a znak: ~w~n', [State, H]),
-    (   rule(State, H, NewState, Action)  % ← bez []
-    ->  format('>>> Nasel jsem: ~w -> ~w / ~w~n', [State, NewState, Action]),
-        do_action(Action, Left, [H|R], NewLeft, NewHead, NewRight),
-        simulate(NewLeft, NewState, [NewHead|NewRight])
-    ;   writeln('Abnormalni zastaveni.'),
-        halt(1)
+%! parse_rule(+Line:atom, -rule(State,Symbol,NextState,Write,Dir))
+% rozdělí surový řetězec podle prvních tří mezer tak, aby se zachovaly i empty‑tokeny
+parse_rule(Line, rule(Q,Sym,NS,W,Dir)) :-
+    atom_codes(Line, Cs),
+    append(A, [32|R1], Cs),        % 32 = space
+    append(B, [32|R2], R1),
+    append(C, [32|D], R2),
+    atom_codes(Q, A),              % původní stav
+    ( B = [] -> Sym = ' '          % pokud mezi mezerami nic, je to blank
+    ; atom_codes(Sym, B)
+    ),
+    atom_codes(NS, C),             % nový stav
+    normalize_D(D, Ds),
+    ( Ds = [76]   ->                % L
+        Dir = left,  W = Sym
+    ; Ds = [82]   ->                % R
+        Dir = right, W = Sym
+    ;                              % přepisovací pravidlo
+        Dir = stay,
+        ( Ds = [] -> W = ' ' ; atom_codes(W, Ds) )
     ).
 
+% odstraní z D všechny kódy 32 (mezery), abychom rozeznali truly empty token
+normalize_D(D, Ds) :-
+    exclude(=(32), D, F),
+    ( F = [] -> Ds = [] ; Ds = F ).
 
+% simulace s detekcí zacyklení (Seen) – hledá první cestu do stavu 'F'
+simulate('F', L, [H|R], Hist, _, Out) :-
+    reverse(L, RevL),
+    append(RevL, ['F',H|R], FinalConf),
+    reverse([FinalConf|Hist], Out).
 
+simulate(State, L, [H|R], Hist, Seen, Out) :-
+    rule(State, H, Next, Write, Dir),
+    move_head(Dir, L, [Write|R], NL, NR),
+    reverse(L, RevL),
+    append(RevL, [State,H|R], CurrConf),
+    \+ member(CurrConf, Seen),
+    simulate(Next, NL, NR, [CurrConf|Hist], [CurrConf|Seen], Out).
 
+simulate(State, L, [], Hist, Seen, Out) :-
+    blank(B),
+    simulate(State, L, [B], Hist, Seen, Out).
 
-print_config(Left, State, Head, Right) :-
-    reverse(Left, Rev),
-    append(Rev, [State, Head | Right], All),
-    flatten(All, Flat),            % zajistí sloučení znaků/atomů
-    print_chars(Flat).
+% pohyb hlavy + doplnění blanku na okraji, pokud dojde páska
+move_head(left,  [],     R,     [],    [B|R]) :- blank(B).
+move_head(left,  [X|Xs], R,     Xs,    [X|R]).
+move_head(right, L,      [],    [B|L], [])  :- blank(B).
+move_head(right, L,      [X|Xs], [X|L], Xs).
+move_head(stay,  L,      R,     L,     R).
 
-print_chars([]) :- nl.
-print_chars([H|T]) :- write(H), print_chars(T).
-
-
-% Akce Turingova stroje
-do_action(['L'], [L|Ls], [H|Rs], Ls, L, [H|Rs]).
-do_action(['R'], Ls, [H, R|Rs], [H|Ls], R, Rs).
-do_action([W], Ls, [_|Rs], Ls, W, Rs).  % Přepis znaku
+% tisk výsledné posloupnosti konfigurací
+print_all([]).
+print_all([C|Cs]) :-
+    maplist(write, C),
+    nl,
+    print_all(Cs).
