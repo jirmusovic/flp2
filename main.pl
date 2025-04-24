@@ -1,93 +1,87 @@
-% main.pl – Nedeterministický Turingův stroj
+% main.pl — nondeterministic Turing Machine with full raw-debug and DCG parser
 :- dynamic rule/5.
-:- use_module(library(readutil)).
+:- discontiguous simulate/5.
+:- initialization(start).
 
-initial('S').
-accepting('F').
-blank(' ').             % atom pro prázdný symbol (mezera)
-
+% Entry point: swipl main.pl < vstup1.txt
 start :-
-    prompt(_, ''),      % vypnout interaktivní prompt
+    retractall(rule(_,_,_,_,_)),
     read_lines(Lines),
-    build(Lines, Rules, Tape),
-    maplist(assertz, Rules),
-    ( simulate('S', [], Tape, [], [], Out) ->
-        print_all(Out),
-        halt(0)
-    ; writeln('Abnormalni zastaveni.'), halt(1)
-    ).
-
-% načte celé stdin jako seznam atomů (jedna řádka = jeden atom)
-read_lines(Ls) :-
-    read_line_to_codes(user_input, Codes),
-    ( Codes == end_of_file ->
-        Ls = []
-    ; atom_codes(A, Codes),
-      read_lines(Rest),
-      Ls = [A|Rest]
-    ).
-
-% rozdělí seznam řádek na pravidla a pásku
-build(Lines, Rules, Tape) :-
-    append(RuleLines, [TapeAtom], Lines),
-    maplist(parse_rule, RuleLines, Rules),
-    atom_chars(TapeAtom, Tape).
-
-%! parse_rule(+Line:atom, -rule(State,Symbol,NextState,Write,Dir))
-% rozdělí surový řetězec podle prvních tří mezer tak, aby se zachovaly i empty‑tokeny
-parse_rule(Line, rule(Q,Sym,NS,W,Dir)) :-
-    atom_codes(Line, Cs),
-    append(A, [32|R1], Cs),        % 32 = space
-    append(B, [32|R2], R1),
-    append(C, [32|D], R2),
-    atom_codes(Q, A),              % původní stav
-    ( B = [] -> Sym = ' '          % pokud mezi mezerami nic, je to blank
-    ; atom_codes(Sym, B)
+    Lines \= [],
+    % RAW INPUT DUMP
+    writeln('=== RAW INPUT LINES ==='),
+    forall(member(L,Lines), writeln(L)),
+    % Split rules vs tape
+    append(RuleLines,[TapeAtom],Lines),
+    writeln('=== RULE LINES ==='), forall(member(RL,RuleLines), writeln(RL)),
+    writeln('=== TAPE LINE ==='), writeln(TapeAtom),
+    % Parse rules via DCG
+    (   maplist(parse_rule,RuleLines)
+    ->  writeln('=== PARSE OK ===')
+    ;   writeln('=== PARSE ERROR: bad rule syntax ==='), halt(2)
     ),
-    atom_codes(NS, C),             % nový stav
-    normalize_D(D, Ds),
-    ( Ds = [76]   ->                % L
-        Dir = left,  W = Sym
-    ; Ds = [82]   ->                % R
-        Dir = right, W = Sym
-    ;                              % přepisovací pravidlo
-        Dir = stay,
-        ( Ds = [] -> W = ' ' ; atom_codes(W, Ds) )
+    atom_chars(TapeAtom,Tape),
+    % DEBUG: final rule/5 table
+    writeln('=== DEBUG: loaded rules ==='),
+    forall(rule(Q,R,QS,WS,Dir), format('  ~w  ~w -> ~w  ~w  ~w~n',[Q,R,QS,WS,Dir])),
+    writeln('=== DEBUG: initial tape ==='), writeln(Tape),
+    initial(S0),
+    (   simulate(S0,[],Tape,[],Out)
+    ->  print_all(Out), halt(0)
+    ;   writeln('Abnormalni zastaveni.'), halt(1)
     ).
 
-% odstraní z D všechny kódy 32 (mezery), abychom rozeznali truly empty token
-normalize_D(D, Ds) :-
-    exclude(=(32), D, F),
-    ( F = [] -> Ds = [] ; Ds = F ).
+% Read all lines until EOF
+read_lines(Ls) :-
+    read_line_to_codes(user_input,Cs),
+    ( Cs == end_of_file -> Ls = []
+    ; atom_codes(L,Cs), read_lines(Rest), Ls = [L|Rest]
+    ).
 
-% simulace s detekcí zacyklení (Seen) – hledá první cestu do stavu 'F'
-simulate('F', L, [H|R], Hist, _, Out) :-
-    reverse(L, RevL),
-    append(RevL, ['F',H|R], FinalConf),
-    reverse([FinalConf|Hist], Out).
+% DCG-based rule parser: "State ReadSym NewState [Action]"
+parse_rule(Line) :-
+    atom_codes(Line,Cs),
+    phrase(rule(State,Read,Next,Write,Dir),Cs),
+    assertz(rule(State,Read,Next,Write,Dir)).
 
-simulate(State, L, [H|R], Hist, Seen, Out) :-
-    rule(State, H, Next, Write, Dir),
-    move_head(Dir, L, [Write|R], NL, NR),
-    reverse(L, RevL),
-    append(RevL, [State,H|R], CurrConf),
-    \+ member(CurrConf, Seen),
-    simulate(Next, NL, NR, [CurrConf|Hist], [CurrConf|Seen], Out).
+rule(State,Read,Next,Write,Dir) -->
+    state_codes(SCs), " ",
+    [SC], { (SC=:=32 -> Read=' ' ; char_code(Read,SC)) }, " ",
+    state_codes(NSCs),
+    ( " ", action(Read,Write,Dir) ; { Write=Read, Dir=stay } ),
+    { atom_codes(State,SCs), atom_codes(Next,NSCs) }.
 
-simulate(State, L, [], Hist, Seen, Out) :-
-    blank(B),
-    simulate(State, L, [B], Hist, Seen, Out).
+state_codes([C|Cs]) -->
+    [C], { char_type(C, upper) },
+    state_codes(Cs).
+state_codes([]) --> [] .
 
-% pohyb hlavy + doplnění blanku na okraji, pokud dojde páska
-move_head(left,  [],     R,     [],    [B|R]) :- blank(B).
-move_head(left,  [X|Xs], R,     Xs,    [X|R]).
-move_head(right, L,      [],    [B|L], [])  :- blank(B).
-move_head(right, L,      [X|Xs], [X|L], Xs).
-move_head(stay,  L,      R,     L,     R).
+action(Read,Read,Dir) --> [76], { Dir=left }.   % 'L'
+action(Read,Read,Dir) --> [82], { Dir=right }.  % 'R'
+action(_, ' ',Dir) --> [32], { Dir=stay }.   % blank write
+action(_,W,Dir) --> [C], { char_code(W,C), Dir=stay } .
 
-% tisk výsledné posloupnosti konfigurací
+% Simulation
+simulate('F', L, R, Hist, [Conf|Hist]) :-
+    reverse(L,RL), append(RL,['F'|R],Conf).
+simulate(St,L,[],Hist,Out) :- blank(B), simulate(St,L,[B],Hist,Out).
+simulate(St,L,[H|T],Hist,Out) :-
+    rule(St,H,NS,W,Dir),
+    move(Dir,L,[W|T],NL,NR),
+    reverse(L,RL), append(RL,[St,H|T],Conf),
+    simulate(NS,NL,NR,[Conf|Hist],Out).
+
+% Movement
+move(left,[],R,[],[' '|R]).
+move(left,[X|Xs],R,Xs,[X|R]).
+move(right,L,[],[B|L],[]) :- blank(B).
+move(right,L,[X|Xs],[X|L],Xs).
+move(stay,L,R,L,R).
+
+% Print
 print_all([]).
-print_all([C|Cs]) :-
-    maplist(write, C),
-    nl,
-    print_all(Cs).
+print_all([C|Cs]) :- maplist(write,C), nl, print_all(Cs).
+
+% Defaults
+initial('S').
+blank(' ').
